@@ -50,7 +50,7 @@ impl PanelContent for Overflow {
             return out;
         }
         let hidden: Vec<_> =
-            list.into_iter().enumerate().filter(|(_, e)| !e.shown).map(|(i, e)| (ICON + i as u32, e.icon)).collect();
+            list.into_iter().enumerate().filter(|(_, e)| !e.visible).map(|(i, e)| (ICON + i as u32, e.icon)).collect();
         let mut out = vec![Widget::Heading { text: "Bandeja".into(), buttons: vec![(glyph::SETTINGS, EDIT)] }];
         if hidden.is_empty() {
             out.push(Widget::Text("Nenhum ícone oculto. Escolha na engrenagem quais saem da barra.".into()));

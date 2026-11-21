@@ -34,8 +34,9 @@ substituir a barra de tarefas do Windows no dia a dia.
 ### Barra do topo
 - Aparece em **todos os monitores** (a dock fica só no principal).
 - **Assume a cor do app em foco** (10% mais escura, para separar a barra do app), na hora em que você troca de janela.
-- CPU e RAM à esquerda; relógio no centro, com calendário ao clicar.
-- Ícones da bandeja à direita, com painel dos ícones ocultos e escolha de quais ficam na barra.
+- Menu do ArcDockWin à esquerda para abrir o lançador, a Central de Controle, o Gerenciador de Tarefas ou sair; a lista aceita as setas e Enter.
+- Relógio, CPU/RAM e ícones de notificação ficam agrupados à direita; clicar no relógio abre o calendário e os painéis de status permanecem realçados enquanto abertos.
+- Os ícones da bandeja passam para o painel de excesso quando falta espaço; também é possível escolher quais ficam visíveis.
 
 ### Central de Controle
 No visual do macOS Tahoe, com cartões arredondados:

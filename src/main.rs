@@ -12,6 +12,7 @@ mod glass;
 mod guard;
 mod i18n;
 mod launcher;
+mod appmenu;
 mod media;
 mod panel;
 mod power;
@@ -76,6 +77,13 @@ const WM_LAUNCHER: u32 = WM_APP + 50;
 
 thread_local! {
     static DOCK: RefCell<Option<Dock>> = const { RefCell::new(None) };
+}
+
+/// Gracefully stop ArcDockWin from a menu action without bypassing shell cleanup.
+pub fn request_quit() {
+    with_dock(|dock| unsafe {
+        let _ = PostMessageW(Some(dock.hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+    });
 }
 
 struct Dock {
@@ -546,7 +554,7 @@ fn start_tray() {
                 let mut icon = t.icon.or_else(|| tiny_skia::Pixmap::new(px, px))?;
                 grayscale(&mut icon);
                 let shown = colordb::tray_shown(&t.key).unwrap_or(true);
-                Some(topbar::TrayEntry { icon, tip: t.tip, key: t.key, shown })
+                Some(topbar::TrayEntry { icon, tip: t.tip, key: t.key, shown, visible: shown })
             })
             .collect();
         topbar::set_tray(icons);

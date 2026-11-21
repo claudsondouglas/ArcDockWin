@@ -34,8 +34,9 @@ Windows taskbar in daily use.
 ### Top bar
 - Shown on **every monitor** (the dock stays on the main one only).
 - **Takes the colour of the focused app** (10% darker, to separate the bar from the app), the moment you switch windows.
-- CPU and RAM on the left; clock in the centre, with a calendar when clicked.
-- Tray icons on the right, with a panel for hidden icons and a choice of which ones stay on the bar.
+- An ArcDockWin app menu on the left for the launcher, Control Center, Task Manager and quit; its command list supports arrow-key navigation and Enter.
+- Clock, CPU/RAM and notification icons are grouped on the right; clicking the clock opens the calendar and status panels stay highlighted while open.
+- Tray icons collapse into an overflow panel when space is tight, and you can choose which icons stay visible.
 
 ### Control Center
 macOS Tahoe look, with rounded cards:

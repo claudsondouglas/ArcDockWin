@@ -94,7 +94,7 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_DELETE, VK_END, VK_ESCAPE,
-    VK_DOWN, VK_HOME, VK_LEFT, VK_RIGHT, VK_UP,
+    VK_DOWN, VK_HOME, VK_LEFT, VK_RETURN, VK_RIGHT, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{BOOL, HSTRING, PCWSTR, w};
@@ -150,6 +150,8 @@ pub enum Widget {
     Field { id: u32, placeholder: String, password: bool },
     /// Grade de células de texto (calendário), `cols` colunas.
     Grid { cols: usize, cells: Vec<Cell> },
+    /// Keyboard-navigable command list with an active-row highlight.
+    Menu { items: Vec<(u32, Option<u16>, String)>, selected: Option<usize> },
     /// Campo de busca grande, sem caixa, com um glifo à esquerda e uma linha embaixo (topo de
     /// painel sem margem). Mesmos eventos de [`Widget::Field`].
     Search { id: u32, placeholder: String, glyph: u16 },
@@ -271,6 +273,7 @@ fn localize_widgets(widgets: &mut [Widget]) {
                 }
             }
             // App names, Wi-Fi SSIDs, and filenames are user/system content, not UI labels.
+            Widget::Menu { items, .. } => items.iter_mut().for_each(|(_, _, text)| translate(text)),
             Widget::Icons { .. } | Widget::List { .. } | Widget::Slider { .. } | Widget::Separator => {}
         }
     }
@@ -289,8 +292,10 @@ pub enum Event<'a> {
     Text(u32, &'a str),
     /// Enter no campo.
     Submit(u32, &'a str),
-    /// Seta para cima/baixo (a roda do mouse também chega assim): o código da tecla.
+    /// Navegação por teclado (a roda do mouse também envia cima/baixo): código da tecla.
     Key(u16),
+    /// Pointer moved between interactive areas; clears keyboard-only selection when appropriate.
+    PointerMove,
 }
 
 /// Conteúdo de um painel. Veja o exemplo no topo do módulo.
@@ -759,6 +764,7 @@ impl Panel {
             Widget::Search { .. } => 56.0,
             Widget::Label(_) => 32.0,
             Widget::List { rows, .. } => LIST_ROW * *rows as f32,
+            Widget::Menu { items, .. } => LIST_ROW * items.len() as f32,
             Widget::Footer { .. } => 44.0,
             Widget::Slider { .. } => 44.0,
             Widget::Button { .. } => 40.0,
@@ -1037,6 +1043,22 @@ impl Panel {
                         let tl = (th * size).max(24.0 * s).min(th);
                         let top = ty + (th - tl) * (start / (1.0 - size).max(0.0001)).clamp(0.0, 1.0);
                         fill(&mut pm, bx, top, bw, tl, bw / 2.0, pal.strong);
+                    }
+                }
+                Widget::Menu { items, selected } => {
+                    let rh = LIST_ROW * s;
+                    for (i, (id, icon, label)) in items.iter().enumerate() {
+                        let ry = y + i as f32 * rh;
+                        let (zy, zh) = (ry + 2.0 * s, rh - 4.0 * s);
+                        zones.push(Zone { x: left, y: zy, w: right - left, h: zh, radius: 6.0 * s, kind: ZoneKind::Click(*id) });
+                        if Some(i) == *selected {
+                            fill(&mut pm, left, zy, right - left, zh, 6.0 * s, pal.hover);
+                        }
+                        let tx = left + inset;
+                        if let Some(icon) = icon {
+                            texts.push(mk(&glyph(*icon), Font::Icon, [tx, ry, 28.0 * s, rh], DWRITE_TEXT_ALIGNMENT_CENTER, pal.dim));
+                        }
+                        texts.push(mk(label, Font::Body, [tx + 40.0 * s, ry, right - inset - tx - 40.0 * s, rh], DWRITE_TEXT_ALIGNMENT_LEADING, pal.ink));
                     }
                 }
                 Widget::Footer { left: label, hints } => {
@@ -1451,6 +1473,10 @@ impl Panel {
 
     fn hover(&mut self, x: f32, y: f32) {
         self.mouse = Some((x, y));
+        if self.content.event(Event::PointerMove) {
+            self.rebuild();
+            return;
+        }
         let hot = self.hit(x, y);
         if hot != self.hot {
             self.hot = hot;
@@ -1589,7 +1615,10 @@ impl Panel {
                 }
             }),
             0x0D => {
-                let Some(id) = self.focus else { return };
+                let Some(id) = self.focus else {
+                    self.emit(Event::Key(VK_RETURN.0));
+                    return;
+                };
                 let Some(field) = self.fields.iter().find(|x| x.id == id) else { return };
                 let text = String::from_utf16_lossy(&field.text);
                 self.emit(Event::Submit(id, &text));
@@ -1638,6 +1667,7 @@ fn close_now(restore: bool) {
             }
         }
         drop(p);
+        crate::topbar::panel_visibility_changed();
     }
 }
 
@@ -1677,6 +1707,7 @@ fn open(key: &'static str, item: RECT, content: Box<dyn PanelContent>, prev_fg: 
     unsafe {
         let _ = SetForegroundWindow(hwnd);
     }
+    crate::topbar::panel_visibility_changed();
 }
 
 /// Fecha o painel aberto, se houver. Seguro de chamar de dentro de [`PanelContent::event`].
@@ -1702,6 +1733,11 @@ pub fn close() {
 #[allow(dead_code)]
 pub fn is_open(key: &str) -> bool {
     with_panel(|p| p.key == key).unwrap_or(false)
+}
+
+/// Whether this item on this monitor owns the currently open popover.
+pub fn is_open_at(key: &str, item: RECT) -> bool {
+    with_panel(|p| p.key == key && p.item == item).unwrap_or(false)
 }
 
 /// Se há algum painel aberto.

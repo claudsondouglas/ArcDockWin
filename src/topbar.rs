@@ -16,7 +16,7 @@ use windows::Win32::Graphics::Direct2D::{
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
-    DWRITE_FONT_WEIGHT_NORMAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER,
+    DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER,
     DWRITE_TEXT_METRICS, DWRITE_WORD_WRAPPING_NO_WRAP, DWriteCreateFactory, IDWriteFactory,
     IDWriteFontCollection, IDWriteTextFormat, IDWriteTextLayout,
 };
@@ -58,12 +58,23 @@ pub struct TrayEntry {
     pub tip: String,
     /// Chave no banco (`exe#uid`).
     pub key: String,
-    /// Na barra (`true`) ou dentro da bandeja.
+    /// User preference: keep the icon on the bar (`true`) or in the overflow panel.
     pub shown: bool,
+    /// Visível na barra depois de aplicar o limite de espaço do monitor.
+    pub visible: bool,
 }
 
 /// Callback de clique na bandeja: índice do ícone, botão e ponto (tela) onde menus devem abrir.
 pub type TrayClick = fn(index: usize, button: TrayButton, anchor: POINT);
+
+#[derive(Clone, Copy)]
+#[repr(usize)]
+pub enum AppMenuAction {
+    Launcher = 1,
+    ControlCenter = 2,
+    TaskManager = 3,
+    Quit = 4,
+}
 
 const WM_APPBAR: u32 = WM_APP + 1;
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -79,6 +90,7 @@ const TIMER_TINT_EVENT: usize = 5;
 const TINT_THROTTLE_MS: u32 = 50;
 /// Monitores mudaram (conectar, resolução, escala): recria as barras depois de um respiro.
 const TIMER_REBUILD: usize = 6;
+const WM_APP_MENU_ACTION: u32 = WM_APP + 70;
 const REBUILD_MS: u32 = 300;
 const STATS_MS: u32 = 2000;
 /// Largura (px) de cada fatia do brilho do wallpaper.
@@ -109,13 +121,14 @@ thread_local! {
 
 #[derive(Clone, Copy, PartialEq)]
 enum Kind {
+    AppMenu,
     Tray(usize),
     /// Seta que abre a bandeja (ícones ocultos e a escolha de quem fica na barra).
     Overflow,
     Clock,
     /// Central de Controle (último à direita): rede, Bluetooth, som, energia, mídia.
     Control,
-    /// CPU e RAM à esquerda; o clique abre o Gerenciador de Tarefas.
+    /// CPU/RAM status extra; clicking opens Task Manager.
     Stats,
 }
 
@@ -145,6 +158,7 @@ struct Bar {
     target: ID2D1DCRenderTarget,
     dwrite: IDWriteFactory,
     text_fmt: IDWriteTextFormat,
+    app_fmt: IDWriteTextFormat,
     icon_fmt: IDWriteTextFormat,
     /// Ícones da bandeja (os ocultos ficam na lista, mas fora da barra).
     tray: Vec<TrayEntry>,
@@ -223,11 +237,11 @@ impl Bar {
             let family = if has(w!("Segoe UI Variable Text")) { w!("Segoe UI Variable Text") } else { w!("Segoe UI") };
             let locale = HSTRING::from(crate::i18n::text_locale());
             let locale_ptr = PCWSTR::from_raw(locale.as_ptr());
-            let format = |family: PCWSTR, size: f32| -> windows::core::Result<IDWriteTextFormat> {
+            let format = |family: PCWSTR, size: f32, weight: DWRITE_FONT_WEIGHT| -> windows::core::Result<IDWriteTextFormat> {
                 let f = dwrite.CreateTextFormat(
                     family,
                     None::<&IDWriteFontCollection>,
-                    DWRITE_FONT_WEIGHT_NORMAL,
+                    weight,
                     DWRITE_FONT_STYLE_NORMAL,
                     DWRITE_FONT_STRETCH_NORMAL,
                     size * scale,
@@ -237,8 +251,9 @@ impl Bar {
                 f.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
                 Ok(f)
             };
-            let text_fmt = format(family, 12.0)?;
-            let icon_fmt = format(w!("Segoe Fluent Icons"), 14.0)?;
+            let text_fmt = format(family, 12.0, DWRITE_FONT_WEIGHT_NORMAL)?;
+            let app_fmt = format(family, 12.0, DWRITE_FONT_WEIGHT_SEMI_BOLD)?;
+            let icon_fmt = format(w!("Segoe Fluent Icons"), 14.0, DWRITE_FONT_WEIGHT_NORMAL)?;
             icon_fmt.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
 
             let glass_fx = glass_fx.or_else(|| glass::Glass::new(glass_hwnd, 0.0).ok());
@@ -264,6 +279,7 @@ impl Bar {
                 target,
                 dwrite,
                 text_fmt,
+                app_fmt,
                 icon_fmt,
                 tray: Vec::new(),
                 items: Vec::new(),
@@ -429,63 +445,119 @@ impl Bar {
         l
     }
 
-    /// Posições dos itens, alinhados à direita (da direita para a esquerda).
+    /// Keeps the app menu on the leading side and groups status items on the trailing side.
+    /// Tray icons collapse into the overflow panel before they can collide with the app menu.
     fn relayout(&mut self) {
         let s = self.scale;
         let pad = PAD * s;
         let mut items = Vec::new();
-        let mut x = self.pixmap.width() as f32 - 6.0 * s;
+        let width = self.pixmap.width() as f32;
 
-        // CPU e RAM à esquerda: glifo apagado + valor; o valor tem largura mínima ("00%")
-        // para o texto não pular quando o número muda.
-        {
-            let mut lx = 6.0 * s + pad;
+        let app_name: Vec<u16> = crate::i18n::tr("ArcDockWin").encode_utf16().collect();
+        if let Some(text) = self.text_layout(&app_name, &self.app_fmt, 160.0 * s) {
+            let mut metrics = DWRITE_TEXT_METRICS::default();
+            let _ = unsafe { text.GetMetrics(&mut metrics) };
+            let left = 6.0 * s;
+            let right = left + metrics.width.ceil() + 2.0 * pad;
+            items.push(Item { kind: Kind::AppMenu, l: left, r: right, text: vec![(text, left + pad, 1.0)] });
+        }
+        let left_limit = items.last().map_or(6.0 * s, |item| item.r + 8.0 * s);
+
+        // Status extras stay together on the trailing edge: control center, clock, tray, stats.
+        let mut x = width - 6.0 * s;
+        x = self.glyph_item(&mut items, x, Kind::Control, &[(crate::control::GLYPH, 1.0)]);
+        x -= 4.0 * s;
+
+        let clock: Vec<u16> = self.clock.encode_utf16().collect();
+        if let Some(text) = self.text_layout(&clock, &self.text_fmt, 1000.0) {
+            let mut metrics = DWRITE_TEXT_METRICS::default();
+            let _ = unsafe { text.GetMetrics(&mut metrics) };
+            let clock_w = metrics.width.ceil() + 2.0 * pad;
+            let left = x - clock_w;
+            items.push(Item { kind: Kind::Clock, l: left, r: x, text: vec![(text, left + pad, 1.0)] });
+            x = left - 4.0 * s;
+        }
+
+        let available = (x - left_limit).max(0.0);
+        let width_of = |text: &IDWriteTextLayout| {
+            let mut metrics = DWRITE_TEXT_METRICS::default();
+            let _ = unsafe { text.GetMetrics(&mut metrics) };
+            metrics.width.ceil()
+        };
+        let value_w = self
+            .text_layout(&"00%".encode_utf16().collect::<Vec<_>>(), &self.text_fmt, 200.0)
+            .map(|text| width_of(&text))
+            .unwrap_or(30.0 * s);
+        let stats_w = 2.0 * (GLYPH_W * s + 2.0 * s + value_w.max(30.0 * s) + 8.0 * s) + 2.0 * pad;
+        let overflow_w = GLYPH_W * s + 2.0 * pad;
+
+        let mut visible: Vec<usize> = self
+            .tray
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, entry)| entry.shown)
+            .map(|(i, _)| i)
+            .collect();
+        let total_shown = visible.len();
+        let mut has_overflow = self.tray.iter().any(|entry| !entry.shown);
+        let mut show_stats = stats_w <= available;
+        let icon_width = |i: usize| self.tray[i].icon.width() as f32 + 2.0 * TRAY_PAD * s;
+
+        loop {
+            let tray_w: f32 = visible.iter().map(|&i| icon_width(i)).sum();
+            let used = tray_w
+                + if has_overflow { overflow_w + 4.0 * s } else { 0.0 }
+                + if show_stats { stats_w + 6.0 * s } else { 0.0 };
+            if used <= available {
+                break;
+            }
+            if visible.pop().is_some() {
+                has_overflow = true;
+            } else if show_stats {
+                show_stats = false;
+            } else {
+                break;
+            }
+        }
+
+        for entry in &mut self.tray {
+            entry.visible = false;
+        }
+        for &i in &visible {
+            self.tray[i].visible = true;
+        }
+        let auto_hidden = visible.len() < total_shown;
+        has_overflow |= auto_hidden;
+
+        // Index order is stable: the rightmost shell icons stay visible first when space is tight.
+        for i in visible {
+            let entry = &self.tray[i];
+            let left = x - entry.icon.width() as f32 - 2.0 * TRAY_PAD * s;
+            items.push(Item { kind: Kind::Tray(i), l: left, r: x, text: Vec::new() });
+            x = left;
+        }
+        if has_overflow {
+            x = self.glyph_item(&mut items, x - 2.0 * s, Kind::Overflow, &[(panel::glyph::CHEVRON_DOWN, 0.8)]);
+        }
+
+        if show_stats {
+            let right = x - 6.0 * s;
+            let left = right - stats_w;
             let mut text = Vec::new();
-            let width = |t: &IDWriteTextLayout| {
-                let mut m = DWRITE_TEXT_METRICS::default();
-                let _ = unsafe { t.GetMetrics(&mut m) };
-                m.width.ceil()
-            };
-            let value_w = self
-                .text_layout(&"00%".encode_utf16().collect::<Vec<_>>(), &self.text_fmt, 200.0)
-                .map(|t| width(&t))
-                .unwrap_or(30.0 * s);
-            let gw = GLYPH_W * s;
-            for (glyph, v) in [(GLYPH_CPU, self.cpu), (GLYPH_RAM, self.ram)] {
-                let value = v.map(|v| format!("{v}%")).unwrap_or_else(|| "–".into());
-                if let Some(t) = self.text_layout(&[glyph], &self.icon_fmt, gw) {
-                    text.push((t, lx, 0.75));
-                    lx += gw + 2.0 * s;
+            let mut lx = left + pad;
+            for (glyph, value) in [(GLYPH_CPU, self.cpu), (GLYPH_RAM, self.ram)] {
+                let value = value.map(|v| format!("{v}%")).unwrap_or_else(|| "–".into());
+                if let Some(layout) = self.text_layout(&[glyph], &self.icon_fmt, GLYPH_W * s) {
+                    text.push((layout, lx, 0.75));
+                    lx += GLYPH_W * s + 2.0 * s;
                 }
-                if let Some(t) = self.text_layout(&value.encode_utf16().collect::<Vec<_>>(), &self.text_fmt, 200.0) {
-                    let w = width(&t).max(value_w);
-                    text.push((t, lx, 1.0));
-                    lx += w + 8.0 * s;
+                if let Some(layout) = self.text_layout(&value.encode_utf16().collect::<Vec<_>>(), &self.text_fmt, 200.0) {
+                    text.push((layout, lx, 1.0));
+                    lx += value_w.max(30.0 * s) + 8.0 * s;
                 }
             }
-            items.push(Item { kind: Kind::Stats, l: 6.0 * s, r: lx - 8.0 * s + pad, text });
-        }
-
-        // Data e hora no centro da barra.
-        let clock: Vec<u16> = self.clock.encode_utf16().collect();
-        if let Some(t) = self.text_layout(&clock, &self.text_fmt, 1000.0) {
-            let mut m = DWRITE_TEXT_METRICS::default();
-            let _ = unsafe { t.GetMetrics(&mut m) };
-            let cw = m.width.ceil() + 2.0 * pad;
-            let l = ((self.pixmap.width() as f32 - cw) / 2.0).round();
-            items.push(Item { kind: Kind::Clock, l, r: l + cw, text: vec![(t, l + pad, 1.0)] });
-        }
-        x = self.glyph_item(&mut items, x, Kind::Control, &[(crate::control::GLYPH, 1.0)]);
-
-        // Bandeja: à esquerda da central, índice 0 mais à esquerda.
-        x -= 4.0 * s;
-        for (i, e) in self.tray.iter().enumerate().rev().filter(|(_, e)| e.shown) {
-            let l = x - e.icon.width() as f32 - 2.0 * TRAY_PAD * s;
-            items.push(Item { kind: Kind::Tray(i), l, r: x, text: Vec::new() });
-            x = l;
-        }
-        if !self.tray.is_empty() {
-            self.glyph_item(&mut items, x, Kind::Overflow, &[(panel::glyph::CHEVRON_DOWN, 0.8)]);
+            items.push(Item { kind: Kind::Stats, l: left, r: right, text });
         }
         self.items = items;
     }
@@ -543,7 +615,20 @@ impl Bar {
         if let Some(r) = Rect::from_xywh(0.0, h - 1.0, w, 1.0) {
             pm.fill_rect(r, &solid(line), id, None);
         }
-        if let Some((i, it)) = self.items.iter().enumerate().find(|(_, i)| Some(i.kind) == self.hot) {
+        let active_panel = self.items.iter().find_map(|item| {
+            let key = match item.kind {
+                Kind::AppMenu => "appmenu",
+                Kind::Clock => "clock",
+                Kind::Control => "control",
+                Kind::Overflow => "tray",
+                _ => return None,
+            };
+            self.item_rect(item.kind)
+                .is_some_and(|rect| panel::is_open_at(key, rect))
+                .then_some(item.kind)
+        });
+        let highlighted = self.hot.or(active_panel);
+        if let Some((i, it)) = self.items.iter().enumerate().find(|(_, i)| Some(i.kind) == highlighted) {
             let hover = if item_light[i] { [0, 0, 0, 24] } else { [255, 255, 255, 36] };
             let m = 2.0 * s;
             if let Some(p) = rounded_rect(it.l, m, it.r - it.l, h - 1.0 - 2.0 * m, 5.0 * s) {
@@ -681,11 +766,14 @@ pub(crate) fn rounded_rect(x: f32, y: f32, w: f32, h: f32, r: f32) -> Option<tin
 
 /// Painel de cada item de status: chave (para o segundo clique fechar) e o conteúdo.
 /// É aqui que se pluga um painel novo.
-fn panel_for(kind: Kind) -> Option<(&'static str, fn() -> Box<dyn PanelContent>)> {
+type PanelFactory = Box<dyn FnOnce() -> Box<dyn PanelContent>>;
+
+fn panel_for(kind: Kind, source_bar: HWND) -> Option<(&'static str, PanelFactory)> {
     Some(match kind {
-        Kind::Clock => ("clock", || Box::new(crate::calendar::Calendar::new())),
-        Kind::Control => ("control", || Box::new(crate::control::ControlCenter::new())),
-        Kind::Overflow => ("tray", || Box::new(crate::overflow::Overflow::new())),
+        Kind::AppMenu => ("appmenu", Box::new(move || Box::new(crate::appmenu::AppMenu::new(source_bar)))),
+        Kind::Clock => ("clock", Box::new(|| Box::new(crate::calendar::Calendar::new()))),
+        Kind::Control => ("control", Box::new(|| Box::new(crate::control::ControlCenter::new()))),
+        Kind::Overflow => ("tray", Box::new(|| Box::new(crate::overflow::Overflow::new()))),
         Kind::Tray(_) | Kind::Stats => return None,
     })
 }
@@ -693,6 +781,18 @@ fn panel_for(kind: Kind) -> Option<(&'static str, fn() -> Box<dyn PanelContent>)
 /// Janela da barra principal (destino das mensagens de trabalho feito em outra thread).
 pub fn hwnd() -> HWND {
     MAIN.get()
+}
+
+/// Posts a command from the ArcDockWin app menu to the bar's UI thread.
+pub fn post_app_menu_action(action: AppMenuAction, source_bar: HWND) {
+    unsafe {
+        let _ = PostMessageW(Some(source_bar), WM_APP_MENU_ACTION, WPARAM(action as usize), LPARAM(0));
+    }
+}
+
+/// Refreshes active-item styling when a popover opens or closes.
+pub fn panel_visibility_changed() {
+    for_bars(|bar| bar.redraw());
 }
 
 /// Barra da janela `hwnd`.
@@ -837,6 +937,22 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 });
                 LRESULT(0)
             }
+            WM_APP_MENU_ACTION => {
+                match wp.0 {
+                    x if x == AppMenuAction::Launcher as usize => crate::launcher::toggle(),
+                    x if x == AppMenuAction::ControlCenter as usize => {
+                        if let Some(rect) = with_bar(hwnd, |bar| bar.item_rect(Kind::Control)).flatten() {
+                            panel::toggle("control", rect, || Box::new(crate::control::ControlCenter::new()));
+                        }
+                    }
+                    x if x == AppMenuAction::TaskManager as usize => {
+                        let _ = ShellExecuteW(None, w!("open"), w!("taskmgr.exe"), None, None, SW_SHOWNORMAL);
+                    }
+                    x if x == AppMenuAction::Quit as usize => crate::request_quit(),
+                    _ => {}
+                }
+                LRESULT(0)
+            }
             WM_LBUTTONUP => {
                 let hit = with_bar(hwnd, |b| b.hit(mouse_x(lp)).map(|k| (k, b.item_rect(k)))).flatten();
                 match hit {
@@ -847,7 +963,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     // Fora do borrow da barra: abrir o painel ativa outra janela.
                     // O painel abre no monitor do item (rect em coordenadas de tela).
                     Some((kind, Some(rect))) => {
-                        if let Some((key, make)) = panel_for(kind) {
+                        if let Some((key, make)) = panel_for(kind, hwnd) {
                             panel::toggle(key, rect, make);
                         }
                     }
