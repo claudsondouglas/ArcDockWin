@@ -12,6 +12,7 @@ mod glass;
 mod guard;
 mod i18n;
 mod launcher;
+mod minimize;
 mod media;
 mod panel;
 mod power;
@@ -67,6 +68,9 @@ const HOVER_TIME: f32 = 0.14;
 const MENU_QUIT: usize = 1;
 const MENU_PIN: usize = 2;
 const MENU_CLOSE: usize = 3;
+const MENU_EFFECT_GENIE: usize = 4;
+const MENU_EFFECT_SCALE: usize = 5;
+const MENU_EFFECT_SUCK: usize = 6;
 /// Itens das janelas do app: MENU_WINDOW + índice.
 const MENU_WINDOW: usize = 100;
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -117,6 +121,8 @@ struct Dock {
     last_inside: Option<Instant>,
     /// Arrastar ícones para reordenar/fixar/desafixar (drag.rs).
     drag: drag::Drag,
+    /// Window snapshots animating into their Dock icons.
+    minimize: minimize::Animator,
 }
 
 impl Dock {
@@ -175,6 +181,7 @@ impl Dock {
                 shown: true,
                 last_inside: None,
                 drag: drag::Drag::default(),
+                minimize: minimize::Animator::new(),
             }
         }
     }
@@ -277,6 +284,45 @@ impl Dock {
         }
     }
 
+    /// Captures a window and sends its snapshot toward the corresponding Dock icon.
+    fn begin_minimize(&mut self, hwnd: HWND) -> bool {
+        if self.drag.busy() || self.minimize.has_window(hwnd) {
+            return false;
+        }
+        let index = if let Some(index) = self.apps.iter().position(|app| app.windows.contains(&hwnd)) {
+            index
+        } else {
+            let _ = self.refresh();
+            let Some(index) = self.apps.iter().position(|app| app.windows.contains(&hwnd)) else { return false };
+            self.redraw();
+            index
+        };
+        let Some((image, source)) = minimize::capture(hwnd) else { return false };
+        let slots = self.slots();
+        let Some(slot) = slots.get(index) else { return false };
+        let y = self.pos.y as f32 + self.pixmap.height() as f32 - self.m.margin - self.m.pad - slot.size;
+        let target = RECT {
+            left: self.pos.x + (slot.x + slot.dx).round() as i32,
+            top: y.round() as i32,
+            right: self.pos.x + (slot.x + slot.dx + slot.size).round() as i32,
+            bottom: (y + slot.size).round() as i32,
+        };
+        self.minimize.add(hwnd, image, source, target, minimize::effect());
+        if !self.minimize.is_active() {
+            return false;
+        }
+        let now = Instant::now();
+        self.last_inside = Some(now);
+        if self.slide_target != 0.0 {
+            self.slide_from = self.slide;
+            self.slide_start = now;
+            self.slide_target = 0.0;
+        }
+        self.start_anim();
+        self.redraw();
+        true
+    }
+
     /// O DWM nem sempre re-amostra o fundo do vidro quando um app minimiza/fecha por trás
     /// (fica com a cor do app). Esconder o vidro por um quadro e mostrar de novo força a releitura.
     fn nudge_glass(&mut self) {
@@ -344,8 +390,9 @@ impl Dock {
         let t = ((now - self.slide_start).as_secs_f32() / SLIDE_TIME).min(1.0);
         self.slide = self.slide_from + (self.slide_target - self.slide_from) * ease(t);
 
-        let settling = self.drag_step();
-        if th >= 1.0 && t >= 1.0 && !attention::bouncing() && !settling {
+        let minimizing = self.minimize.step();
+        let settling = self.drag_step() || minimizing;
+        if th >= 1.0 && t >= 1.0 && !attention::bouncing() && !settling && !self.minimize.is_active() {
             self.animating = false;
         }
         self.apply_shown();
@@ -400,7 +447,7 @@ impl Dock {
     /// Decide se o dock deve aparecer ou sumir (chamado a cada ~50 ms).
     fn edge_tick(&mut self) {
         let now = Instant::now();
-        if self.tracking || self.drag.busy() || MENU_OPEN.load(Ordering::Relaxed) || self.at_edge() || !self.covered() {
+        if self.tracking || self.drag.busy() || self.minimize.is_active() || MENU_OPEN.load(Ordering::Relaxed) || self.at_edge() || !self.covered() {
             self.last_inside = Some(now);
         }
         // Aparecer é imediato; esconder espera a carência.
@@ -668,6 +715,24 @@ unsafe extern "system" fn on_foreground(
     });
 }
 
+/// Starts a Dock-targeted snapshot animation before a window is hidden.
+unsafe extern "system" fn on_minimize_event(
+    _: HWINEVENTHOOK,
+    event: u32,
+    hwnd: HWND,
+    _: i32,
+    _: i32,
+    _: u32,
+    _: u32,
+) {
+    with_dock(|dock| {
+        if event == EVENT_SYSTEM_MINIMIZESTART {
+            let _ = dock.begin_minimize(hwnd);
+        }
+        unsafe { SetTimer(Some(dock.hwnd), TIMER_GLASS, 500, None) };
+    });
+}
+
 /// Menu do botão direito: com `target` (key, fixado, janelas), as opções do app; sempre "Sair".
 /// `anchor`: ponto acima do centro do ícone onde o menu se apoia (sem ícone, abre no mouse).
 unsafe fn context_menu(hwnd: HWND, target: Option<(String, bool, Vec<HWND>)>, anchor: Option<POINT>) {
@@ -696,6 +761,20 @@ unsafe fn context_menu(hwnd: HWND, target: Option<(String, bool, Vec<HWND>)>, an
                     let _ = AppendMenuW(menu, MF_STRING, MENU_CLOSE, &text);
                 }
             }
+            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        }
+        if let Ok(effects) = CreatePopupMenu() {
+            for (effect, id) in [
+                (minimize::Effect::Genie, MENU_EFFECT_GENIE),
+                (minimize::Effect::Scale, MENU_EFFECT_SCALE),
+                (minimize::Effect::Suck, MENU_EFFECT_SUCK),
+            ] {
+                let flags = MF_STRING | if minimize::effect() == effect { MF_CHECKED } else { MF_UNCHECKED };
+                let label = HSTRING::from(crate::i18n::tr(effect.label()));
+                let _ = AppendMenuW(effects, flags, id, &label);
+            }
+            let label = HSTRING::from(crate::i18n::tr("Minimizar janelas com"));
+            let _ = AppendMenuW(menu, MF_POPUP, effects.0 as usize, &label);
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         }
         let quit = HSTRING::from(crate::i18n::tr("Sair do ArcDockWin"));
@@ -727,6 +806,12 @@ unsafe fn context_menu(hwnd: HWND, target: Option<(String, bool, Vec<HWND>)>, an
         if cmd == MENU_QUIT {
             let _ = DestroyWindow(hwnd);
             return;
+        }
+        match cmd {
+            MENU_EFFECT_GENIE => { minimize::set_effect(minimize::Effect::Genie); return; }
+            MENU_EFFECT_SCALE => { minimize::set_effect(minimize::Effect::Scale); return; }
+            MENU_EFFECT_SUCK => { minimize::set_effect(minimize::Effect::Suck); return; }
+            _ => {}
         }
         let Some((key, pinned, windows)) = target else { return };
         match cmd {
@@ -841,6 +926,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 })
                 .flatten();
                 if let Some((source, windows)) = target {
+                    if windows.len() == 1 && unsafe { GetForegroundWindow() } == windows[0] {
+                        with_dock(|d| d.begin_minimize(windows[0]));
+                    }
                     apps::activate(&source, &windows);
                 }
                 LRESULT(0)
@@ -1030,7 +1118,7 @@ fn main() -> windows::core::Result<()> {
             EVENT_SYSTEM_MINIMIZESTART,
             EVENT_SYSTEM_MINIMIZEEND,
             None,
-            Some(on_foreground),
+            Some(on_minimize_event),
             0,
             0,
             WINEVENT_OUTOFCONTEXT,
