@@ -344,3 +344,12 @@ pub fn autostart() -> bool {
 pub fn set_autostart(on: bool) {
     set_flag("autostart", on);
 }
+
+/// Procurar atualizações no GitHub sozinho (instalar só com um clique).
+pub fn auto_update() -> bool {
+    flag("auto_update")
+}
+
+pub fn set_auto_update(on: bool) {
+    set_flag("auto_update", on);
+}

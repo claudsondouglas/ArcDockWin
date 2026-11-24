@@ -79,6 +79,8 @@ ArcDockWin 會讀取 Windows 使用者的 UI 顯示語言，內建葡萄牙文�
 
 從 [GitHub Releases](https://github.com/claudsondouglas/ArcDockWin/releases/latest) 下載 `arcdockwin.exe`。建議放在固定資料夾，例如 `C:\Programas\ArcDockWin`，再啟動程式。需求：Windows 11。Windows 10 未獲正式支援，但有使用者回報可以運作；在 Windows 10 上，選單列與控制中心會改用 Segoe MDL2 Assets 圖示字型。
 
+ArcDockWin 會自動到 GitHub 檢查新版本。有新版本時，Dock 的右鍵選單與「設定 → 一般 → 關於」會出現「更新 ArcDockWin」；按下後會下載新版本、驗證檔案並重新開啟程式。不會在你沒同意時安裝，也可以在「設定 → 一般」關閉自動檢查。
+
 ### 從原始碼編譯
 
 需求：Windows 11、Rust MSVC 工具鏈與 Visual Studio C++ Build Tools。

@@ -339,7 +339,7 @@ fn capitalize(s: &str) -> String {
 }
 
 /// GET HTTPS; (status, corpo) ou `None` sem conexão.
-fn http_get(host: PCWSTR, path: PCWSTR, headers: &str) -> Option<(u32, Vec<u8>)> {
+pub(crate) fn http_get(host: PCWSTR, path: PCWSTR, headers: &str) -> Option<(u32, Vec<u8>)> {
     struct Handle(*mut core::ffi::c_void);
     impl Drop for Handle {
         fn drop(&mut self) {
@@ -355,7 +355,7 @@ fn http_get(host: PCWSTR, path: PCWSTR, headers: &str) -> Option<(u32, Vec<u8>)>
         let conn = ok(WinHttpConnect(session.0, host, INTERNET_DEFAULT_HTTPS_PORT, 0))?;
         let req = ok(WinHttpOpenRequest(conn.0, w!("GET"), path, PCWSTR::null(), PCWSTR::null(), std::ptr::null(), WINHTTP_FLAG_SECURE))?;
         let headers: Vec<u16> = headers.encode_utf16().collect();
-        WinHttpSendRequest(req.0, Some(&headers), None, 0, 0, 0).ok()?;
+        WinHttpSendRequest(req.0, (!headers.is_empty()).then_some(&headers[..]), None, 0, 0, 0).ok()?;
         WinHttpReceiveResponse(req.0, std::ptr::null_mut()).ok()?;
         let mut status = 0u32;
         let mut len = 4u32;

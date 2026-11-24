@@ -142,6 +142,12 @@ languages are welcome through pull requests.
 > The `.exe` is not digitally signed, so Windows may show **"Windows protected your PC"**.
 > Click **More info → Run anyway**.
 
+### Updates
+
+ArcDockWin checks GitHub for new versions on its own. When one is out, **Update ArcDockWin** shows up in the dock's
+right-click menu and in Settings → General → About. One click downloads the new version, verifies the file and
+restarts the app. Nothing is installed until you ask, and you can turn the check off in Settings → General.
+
 Requirement: **Windows 11**. Windows 10 is not officially supported, but users report that it works; the menu bar and control panel fall back to the Segoe MDL2 Assets icon font there.
 
 ### Build from source

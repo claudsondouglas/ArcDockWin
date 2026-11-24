@@ -68,6 +68,7 @@ enum Opt {
     AllMonitors,
     Autostart,
     WinKey,
+    AutoUpdate,
 }
 
 /// O que uma área clicável faz.
@@ -79,6 +80,8 @@ enum Act {
     Slider(Opt, f32, f32),
     Effect(Effect),
     Link,
+    /// Procurar / instalar atualização, ou abrir a página do release se falhou.
+    Update,
     /// Módulo da barra do topo: liga/desliga, zona, sobe (-1) ou desce (+1).
     ModOn(Module),
     ModZone(Module, BarZone),
@@ -93,6 +96,8 @@ enum Row {
     Effect(bool),
     Info(&'static str, String),
     Link(&'static str, &'static str),
+    /// Atualizações: texto, valor (já traduzidos) e se dá para clicar.
+    Update(String, String, bool),
     /// Módulo da barra; pode subir / descer dentro da zona.
     Module(Slot, bool, bool),
 }
@@ -233,6 +238,12 @@ fn toggle(o: Opt) {
             config::set_win_key_launcher(!config::win_key_launcher());
             crate::winkey::config_changed();
         }
+        Opt::AutoUpdate => {
+            config::set_auto_update(!config::auto_update());
+            if config::auto_update() {
+                crate::update::check_now();
+            }
+        }
         Opt::IconSize | Opt::MagnifySize => {}
     }
 }
@@ -250,6 +261,11 @@ fn run(act: Act) {
         }
         Act::Link => unsafe {
             ShellExecuteW(None, w!("open"), &HSTRING::from(URL), None, None, SW_SHOWNORMAL);
+        },
+        Act::Update => match crate::update::status() {
+            crate::update::Status::Available(_) => crate::update::install(),
+            crate::update::Status::Failed => crate::update::open_release_page(),
+            _ => crate::update::check_now(),
         },
         Act::ModOn(m) => {
             config::set_module_on(m, !config::module_on(m));
@@ -271,6 +287,25 @@ fn run(act: Act) {
 fn decimal(v: f32) -> String {
     let s = format!("{v:.2}");
     if crate::i18n::is_traditional_chinese() || crate::i18n::is_english() { s } else { s.replace('.', ",") }
+}
+
+/// Linha de atualizações do "Sobre", conforme o estado da busca.
+fn update_row() -> Row {
+    use crate::update::Status;
+    let (label, value, active) = match crate::update::status() {
+        Status::Idle => ("Atualizações", tr("Procurar agora"), true),
+        Status::Checking => ("Atualizações", tr("Procurando…"), false),
+        Status::UpToDate => ("Você tem a versão mais recente", tr("Procurar agora"), true),
+        Status::Available(v) => ("Nova versão disponível", format!("{} v{v}", tr("Instalar")), true),
+        Status::Downloading => ("Atualizando…", String::new(), false),
+        Status::Failed => ("Não foi possível atualizar", tr("Baixar manualmente"), true),
+    };
+    Row::Update(tr(label), value, active)
+}
+
+/// Estado da atualização mudou: redesenha, se a janela estiver aberta.
+pub fn refresh() {
+    with_win(|w| w.redraw());
 }
 
 /// Conteúdo da seção `page`.
@@ -320,10 +355,12 @@ fn blocks(page: usize) -> Vec<Block> {
             Block::Card(vec![
                 Row::Toggle(Opt::Autostart, "Iniciar com o Windows", config::autostart()),
                 Row::Toggle(Opt::WinKey, "Tecla Windows abre o lançador", config::win_key_launcher()),
+                Row::Toggle(Opt::AutoUpdate, "Procurar atualizações automaticamente", config::auto_update()),
             ]),
             Block::Label("Sobre"),
             Block::Card(vec![
                 Row::Info("ArcDockWin", format!("{} {}", tr("Versão"), env!("CARGO_PKG_VERSION"))),
+                update_row(),
                 Row::Link("Repositório", "github.com/claudsondouglas/ArcDockWin"),
             ]),
         ],
@@ -496,6 +533,14 @@ impl Win {
                     Row::Info(t, v) => {
                         text(t, Font::Bold, label, lead, pal.ink);
                         text(v, Font::Body, label, trail, pal.dim);
+                    }
+                    Row::Update(t, v, active) => {
+                        let ink = if *active { rgba(pal.accent) } else { pal.dim };
+                        if *active {
+                            zones.push(Zone { r: whole, radius: 8.0 * s, act: Act::Update });
+                        }
+                        text(t, Font::Body, label, lead, pal.ink);
+                        text(v, Font::Body, [lx, ry, rx - lx, rh], trail, ink);
                     }
                     Row::Link(t, v) => {
                         zones.push(Zone { r: whole, radius: 8.0 * s, act: Act::Link });

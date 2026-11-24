@@ -140,6 +140,12 @@ pull request.
 > O `.exe` não é assinado digitalmente, então o Windows pode mostrar **"O Windows protegeu o computador"**.
 > Clique em **Mais informações → Executar assim mesmo**.
 
+### Atualizações
+
+O ArcDockWin procura versões novas no GitHub sozinho. Quando sai uma, aparece **Atualizar o ArcDockWin** no menu
+do botão direito da dock e em Configurações → Geral → Sobre. Um clique baixa a versão nova, confere o arquivo e
+reabre o app. Nada é instalado sem você pedir, e dá para desligar a busca em Configurações → Geral.
+
 Requisito: **Windows 11**. O Windows 10 não tem suporte oficial, mas há relatos de que funciona; nele, a barra de menus e o painel de controle usam a fonte de ícones Segoe MDL2 Assets.
 
 ### Compilar do código

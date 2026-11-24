@@ -1,0 +1,46 @@
+# Ao enviar uma tag vX.Y.Z: compila, monta o zip e cria o release como rascunho com
+# arcdockwin.exe e ArcDockWin-vX.Y.Z.zip. Revise as notas e publique: só depois de publicado o
+# release aparece como "latest" e os apps instalados oferecem a atualização.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Conferir versão
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"(.+)"').Matches[0].Groups[1].Value
+          if ("v$version" -ne "${{ github.ref_name }}") {
+            throw "A tag ${{ github.ref_name }} não bate com a versão do Cargo.toml ($version)"
+          }
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Compilar
+        run: cargo build --release --locked
+
+      - name: Montar zip
+        shell: pwsh
+        run: |
+          $dir = "dist"
+          New-Item -ItemType Directory -Force "$dir\icons" | Out-Null
+          Copy-Item target\release\arcdockwin.exe, LICENSE, README.md, README.pt-BR.md, README.zh-TW.md $dir
+          Copy-Item icons\*.ps1 "$dir\icons"
+          Compress-Archive -Path "$dir\*" -DestinationPath "ArcDockWin-${{ github.ref_name }}.zip"
+
+      - name: Criar release (rascunho)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create ${{ github.ref_name }} --draft --title "ArcDockWin ${{ github.ref_name }}" --generate-notes
+          target/release/arcdockwin.exe ArcDockWin-${{ github.ref_name }}.zip

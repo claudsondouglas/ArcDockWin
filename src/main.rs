@@ -29,6 +29,7 @@ mod taskbar;
 mod tint;
 mod topbar;
 mod tray;
+mod update;
 mod overflow;
 mod volume;
 mod wifi;
@@ -85,6 +86,7 @@ const MENU_NEW: usize = 5;
 const MENU_ADMIN: usize = 6;
 const MENU_LOCATION: usize = 7;
 const MENU_MORE: usize = 8;
+const MENU_UPDATE: usize = 9;
 /// Itens das janelas do app: MENU_WINDOW + índice.
 const MENU_WINDOW: usize = 100;
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -744,6 +746,7 @@ pub fn rebuild_docks() {
         if dock.primary {
             attention::register(dock.hwnd);
             stacks::watch_trash(dock.hwnd, WM_TRASH);
+            update::set_window(dock.hwnd);
         }
     });
     taskbar::hide();
@@ -1141,6 +1144,10 @@ unsafe fn context_menu(hwnd: HWND, target: Option<(String, String, bool, Vec<HWN
             }
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         }
+        if matches!(update::status(), update::Status::Available(_)) {
+            let text = HSTRING::from(crate::i18n::tr("Atualizar o ArcDockWin"));
+            let _ = AppendMenuW(menu, MF_STRING, MENU_UPDATE, &text);
+        }
         let settings = HSTRING::from(crate::i18n::tr("Configurações…"));
         let _ = AppendMenuW(menu, MF_STRING, MENU_SETTINGS, &settings);
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
@@ -1176,6 +1183,10 @@ unsafe fn context_menu(hwnd: HWND, target: Option<(String, String, bool, Vec<HWN
         }
         if cmd == MENU_SETTINGS {
             settings::open();
+            return;
+        }
+        if cmd == MENU_UPDATE {
+            update::install();
             return;
         }
         let Some((key, source, pinned, windows)) = target else { return };
@@ -1237,6 +1248,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
             WM_LAUNCHER => {
                 launcher::toggle();
+                LRESULT(0)
+            }
+            update::WM_UPDATE => {
+                if wp.0 == 1 {
+                    update::relaunch(hwnd);
+                } else {
+                    settings::refresh();
+                }
                 LRESULT(0)
             }
             WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
@@ -1499,6 +1518,7 @@ fn main() -> windows::core::Result<()> {
         return Ok(());
     }
     i18n::initialize();
+    update::after_update();
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
@@ -1542,6 +1562,7 @@ fn main() -> windows::core::Result<()> {
         launcher::preload();
         start_tray();
         autostart();
+        update::start(main_hwnd);
         let _ = SetWinEventHook(
             EVENT_SYSTEM_FOREGROUND,
             EVENT_SYSTEM_FOREGROUND,
