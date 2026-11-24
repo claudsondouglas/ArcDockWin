@@ -59,6 +59,7 @@ pub struct Theme {
     sheen: [u8; 4],
     /// Pontinhos do app em foco: cor de destaque do Windows.
     accent: [u8; 4],
+    pub light: bool,
 }
 
 impl Theme {
@@ -71,7 +72,7 @@ impl Theme {
             // Vidro escuro azulado com borda clara fina e um brilho leve em cima e embaixo.
             ([30, 35, 45, alpha], [255, 255, 255, 46], [255, 255, 255, 210], [255, 255, 255, 56], [255, 255, 255, 18])
         };
-        Self { tint, border, dot, divider, sheen, accent: accent.unwrap_or(dot) }
+        Self { tint, border, dot, divider, sheen, accent: accent.unwrap_or(dot), light }
     }
 }
 

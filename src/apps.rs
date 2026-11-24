@@ -157,6 +157,50 @@ pub fn toggle_separator(apps: &mut [App], key: &str) {
 /// Item especial do botão Iniciar.
 pub const START: &str = "::start";
 
+/// Nome do app para o balão do dock: descrição do .exe ("Brave Browser") ou nome do app da Store.
+pub fn display_name(source: &str) -> String {
+    thread_local! {
+        static CACHE: std::cell::RefCell<HashMap<String, String>> = std::cell::RefCell::new(HashMap::new());
+    }
+    match source {
+        // O botão abre o lançador ou o menu Iniciar do Windows, conforme a opção.
+        START if crate::config::win_key_launcher() => return crate::i18n::tr("Lançador"),
+        START => return crate::i18n::tr("Iniciar"),
+        crate::stacks::DOWNLOADS => return crate::i18n::tr("Downloads"),
+        crate::stacks::TRASH => return crate::i18n::tr("Lixeira"),
+        _ => {}
+    }
+    if let Some(name) = CACHE.with_borrow(|c| c.get(source).cloned()) {
+        return name;
+    }
+    let name = shell_name(source).unwrap_or_else(|| {
+        Path::new(source).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| source.to_string())
+    });
+    CACHE.with_borrow_mut(|c| c.insert(source.to_string(), name.clone()));
+    name
+}
+
+fn shell_name(source: &str) -> Option<String> {
+    use windows::Win32::Storage::EnhancedStorage::PKEY_FileDescription;
+    use windows::Win32::System::Com::CoTaskMemFree;
+    use windows::Win32::UI::Shell::{IShellItem2, SIGDN_NORMALDISPLAY};
+    let take = |p: PWSTR| unsafe {
+        let s = p.to_string().ok();
+        CoTaskMemFree(Some(p.0 as _));
+        s.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    };
+    let parse = store_app_id(source).map(|id| format!("{APPS_FOLDER}{id}")).unwrap_or_else(|| source.to_string());
+    unsafe {
+        let item: IShellItem2 = SHCreateItemFromParsingName(&HSTRING::from(&parse), None).ok()?;
+        if !parse.starts_with(APPS_FOLDER)
+            && let Some(desc) = item.GetString(&PKEY_FileDescription).ok().and_then(take)
+        {
+            return Some(desc);
+        }
+        item.GetDisplayName(SIGDN_NORMALDISPLAY).ok().and_then(take)
+    }
+}
+
 /// Logo do Windows: quatro quadrados com degradê azul.
 fn start_icon(size: u32) -> Option<Pixmap> {
     use tiny_skia::{GradientStop, LinearGradient, Paint, Point, Rect, SpreadMode, Transform};

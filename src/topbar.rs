@@ -153,10 +153,7 @@ struct Item {
 /// de GPU (96 dpi: 1 DIP = 1 px; a escala vai nos tamanhos). Um render target e uma fábrica
 /// DirectWrite para todas as barras (mesma thread; BindDC troca a DIB a cada desenho): cada
 /// render target em software custa ~2 MB.
-fn shared_d2d() -> windows::core::Result<(ID2D1DCRenderTarget, IDWriteFactory)> {
-    thread_local! {
-        static D2D: std::cell::RefCell<Option<(ID2D1DCRenderTarget, IDWriteFactory)>> = const { std::cell::RefCell::new(None) };
-    }
+pub(crate) fn shared_d2d() -> windows::core::Result<(ID2D1DCRenderTarget, IDWriteFactory)> {
     D2D.with_borrow_mut(|slot| {
         if let Some(pair) = slot {
             return Ok(pair.clone());
@@ -181,6 +178,17 @@ fn shared_d2d() -> windows::core::Result<(ID2D1DCRenderTarget, IDWriteFactory)> 
     })
 }
 
+thread_local! {
+    static D2D: RefCell<Option<(ID2D1DCRenderTarget, IDWriteFactory)>> = const { RefCell::new(None) };
+}
+
+/// Descarta o render target compartilhado; o próximo `shared_d2d` cria outro. Um alvo que
+/// falhou no BindDC ou no EndDraw (ex.: D2DERR_RECREATE_TARGET) não volta sozinho: sem
+/// isso, o texto de todas as barras (relógio, CPU/RAM, glifos) sumia até reabrir o dock.
+fn reset_shared_d2d() {
+    D2D.with_borrow_mut(|slot| *slot = None);
+}
+
 struct Bar {
     hwnd: HWND,
     /// Janela atrás que só fornece o desfoque (vidro).
@@ -196,7 +204,6 @@ struct Bar {
     memdc: HDC,
     dib: HBITMAP,
     bits: *mut u8,
-    target: ID2D1DCRenderTarget,
     dwrite: IDWriteFactory,
     text_fmt: IDWriteTextFormat,
     icon_fmt: IDWriteTextFormat,
@@ -255,7 +262,7 @@ impl Bar {
             let memdc = CreateCompatibleDC(None);
             SelectObject(memdc, HGDIOBJ(dib.0));
 
-            let (target, dwrite) = shared_d2d()?;
+            let (_, dwrite) = shared_d2d()?;
             let mut fonts: Option<IDWriteFontCollection> = None;
             dwrite.GetSystemFontCollection(&mut fonts, false)?;
             let has = |name: PCWSTR| {
@@ -305,7 +312,6 @@ impl Bar {
                 memdc,
                 dib,
                 bits: bits as *mut u8,
-                target,
                 dwrite,
                 text_fmt,
                 icon_fmt,
@@ -748,25 +754,34 @@ impl Bar {
         // Texto e glifos por cima, direto na DIB.
         let (wi, hi) = (w as i32, h as i32);
         unsafe {
-            if self.target.BindDC(self.memdc, &RECT { left: 0, top: 0, right: wi, bottom: hi }).is_ok() {
-                let color = D2D1_COLOR_F { r: ink[0], g: ink[1], b: ink[2], a: ink[3] };
-                if let Ok(brush) = self.target.CreateSolidColorBrush(&color, None) {
-                    self.target.BeginDraw();
-                    for (it, &il) in self.items.iter().zip(&item_light) {
-                        let c = if app.is_some() || il == light {
-                            color
-                        } else if il {
-                            D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.88 }
-                        } else {
-                            D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.95 }
-                        };
-                        brush.SetColor(&c);
-                        for (t, x, alpha) in &it.text {
-                            brush.SetOpacity(*alpha);
-                            self.target.DrawTextLayout(Vector2 { X: *x, Y: 0.0 }, t, &brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
-                        }
+            let color = D2D1_COLOR_F { r: ink[0], g: ink[1], b: ink[2], a: ink[3] };
+            let draw_text = |target: &ID2D1DCRenderTarget| -> bool {
+                if target.BindDC(self.memdc, &RECT { left: 0, top: 0, right: wi, bottom: hi }).is_err() {
+                    return false;
+                }
+                let Ok(brush) = target.CreateSolidColorBrush(&color, None) else { return false };
+                target.BeginDraw();
+                for (it, &il) in self.items.iter().zip(&item_light) {
+                    let c = if app.is_some() || il == light {
+                        color
+                    } else if il {
+                        D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.88 }
+                    } else {
+                        D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.95 }
+                    };
+                    brush.SetColor(&c);
+                    for (t, x, alpha) in &it.text {
+                        brush.SetOpacity(*alpha);
+                        target.DrawTextLayout(Vector2 { X: *x, Y: 0.0 }, t, &brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
                     }
-                    let _ = self.target.EndDraw(None, None);
+                }
+                target.EndDraw(None, None).is_ok()
+            };
+            // Se o alvo falhar, recria e tenta mais uma vez.
+            for _ in 0..2 {
+                match shared_d2d() {
+                    Ok((target, _)) if draw_text(&target) => break,
+                    _ => reset_shared_d2d(),
                 }
             }
 

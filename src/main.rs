@@ -27,6 +27,7 @@ mod stacks;
 mod status;
 mod taskbar;
 mod tint;
+mod tooltip;
 mod topbar;
 mod tray;
 mod update;
@@ -163,6 +164,9 @@ struct Dock {
     drag: drag::Drag,
     /// Registrado como AppBar na borda de baixo (modo barra de tarefas sem ocultar).
     appbar: bool,
+    /// Balão com o nome do ícone sob o mouse (tooltip.rs): ligado no movimento, desligado ao
+    /// sair, clicar ou rolar.
+    tip: bool,
 }
 
 impl Dock {
@@ -219,6 +223,7 @@ impl Dock {
                 ticks: 0,
                 drag: drag::Drag::default(),
                 appbar: false,
+                tip: false,
             }
         }
     }
@@ -529,6 +534,9 @@ impl Dock {
         }
         self.apply_shown();
         self.redraw();
+        if self.tip {
+            self.update_tip();
+        }
     }
 
     /// Muda o alvo do zoom (0 ou 1) e começa a animação a partir do valor atual.
@@ -675,6 +683,22 @@ impl Dock {
             x: self.pos.x + (slot.x + slot.size / 2.0).round() as i32,
             y: self.pos.y + self.offset() + (top - self.m.gap).round() as i32,
         })
+    }
+
+    /// Mostra, move ou esconde o balão com o nome do ícone sob o mouse.
+    fn update_tip(&self) {
+        let item = (self.tip && self.target > 0.0 && self.slide < 0.01 && !self.drag.busy())
+            .then(|| self.hit(self.mx_target))
+            .flatten()
+            .filter(|_| !preview::is_open() && !MENU_OPEN.load(Ordering::Relaxed));
+        let shown = item.and_then(|i| {
+            let source = self.apps.get(i).or_else(|| self.stack_items().get(i - self.apps.len()))?.source.clone();
+            Some((apps::display_name(&source), self.menu_anchor(i)?))
+        });
+        match shown {
+            Some((name, anchor)) => tooltip::show(&name, anchor, self.scale, self.theme.light),
+            None => tooltip::hide(),
+        }
     }
 
     fn hit(&self, x: f32) -> Option<usize> {
@@ -904,6 +928,11 @@ fn with_dock_on_monitor<R>(monitor: HMONITOR, f: impl FnOnce(&mut Dock) -> R) ->
             .or_else(|| (!docks.is_empty()).then_some(0))?;
         docks.get_mut(index).map(f)
     })
+}
+
+fn hide_tip(hwnd: HWND) {
+    with_dock(hwnd, |d| d.tip = false);
+    tooltip::hide();
 }
 
 fn docks_animating() -> bool {
@@ -1417,6 +1446,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     }
                     d.drag_move(d.mx_target, mouse_y(lp));
                     d.set_hover(1.0);
+                    d.tip = true;
+                    d.update_tip();
                     if !d.animating {
                         d.redraw();
                     }
@@ -1427,6 +1458,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 preview::dock_left();
                 with_dock(hwnd, |d| {
                     d.tracking = false;
+                    d.tip = false;
+                    tooltip::hide();
                     // Com o mouse capturado no arrasto, o zoom fica até soltar.
                     if d.drag.busy() {
                         return;
@@ -1436,6 +1469,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 LRESULT(0)
             }
             WM_MOUSEWHEEL => {
+                hide_tip(hwnd);
                 // A wheel scroll over a grouped app cycles through that app's windows.
                 let mut point = POINT {
                     x: (lp.0 & 0xffff) as i16 as i32,
@@ -1491,6 +1525,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 LRESULT(0)
             }
             WM_LBUTTONDOWN => {
+                hide_tip(hwnd);
                 with_dock(hwnd, |d| d.drag_down(mouse_x(lp), mouse_y(lp)));
                 LRESULT(0)
             }
@@ -1524,6 +1559,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 LRESULT(0)
             }
             WM_RBUTTONUP => {
+                hide_tip(hwnd);
                 preview::dismiss();
                 if let Some((source, anchor)) = with_dock(hwnd, |d| d.stack_at(d.hit(mouse_x(lp))?)).flatten() {
                     MENU_OPEN.store(true, Ordering::Relaxed);
@@ -1572,6 +1608,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     topbar::shutdown();
                     taskbar::restore();
                     preview::shutdown();
+                    tooltip::shutdown();
                     minimize::shutdown();
                 }
                 LRESULT(0)
@@ -1585,6 +1622,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     topbar::shutdown();
                     taskbar::restore();
                     preview::shutdown();
+                    tooltip::shutdown();
                     minimize::shutdown();
                     PostQuitMessage(0);
                 }

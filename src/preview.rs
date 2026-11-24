@@ -317,6 +317,7 @@ fn show(t: &Target) {
     }
     let Some(hwnd) = with(|s| s.hwnd) else { return };
     unregister_thumbs();
+    crate::tooltip::hide();
 
     unsafe {
         let monitor = MonitorFromPoint(t.anchor, MONITOR_DEFAULTTONEAREST);
